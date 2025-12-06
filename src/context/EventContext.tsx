@@ -1,4 +1,5 @@
 import { createContext, useContext, useState, useEffect, ReactNode } from 'react';
+import { supabase, isSupabaseConfigured } from '../lib/supabase';
 
 export interface BarEvent {
   id: number;
@@ -15,9 +16,11 @@ export interface BarEvent {
 
 interface EventContextType {
   events: BarEvent[];
-  addEvent: (event: Omit<BarEvent, 'id'>) => void;
-  updateEvent: (id: number, event: Omit<BarEvent, 'id'>) => void;
-  deleteEvent: (id: number) => void;
+  loading: boolean;
+  addEvent: (event: Omit<BarEvent, 'id'>) => Promise<void>;
+  updateEvent: (id: number, event: Omit<BarEvent, 'id'>) => Promise<void>;
+  deleteEvent: (id: number) => Promise<void>;
+  refreshEvents: () => Promise<void>;
   isAuthenticated: boolean;
   login: (password: string) => boolean;
   logout: () => void;
@@ -25,7 +28,7 @@ interface EventContextType {
 
 const EventContext = createContext<EventContextType | undefined>(undefined);
 
-// デフォルトのイベントデータ
+// デフォルトのイベントデータ（ローカルモード用）
 const defaultEvents: BarEvent[] = [
   {
     id: 1,
@@ -65,36 +68,154 @@ const defaultEvents: BarEvent[] = [
   },
 ];
 
-// 管理者パスワード（実際の運用では環境変数やバックエンドで管理）
-const ADMIN_PASSWORD = 'habit2025';
+// 管理者パスワード
+const ADMIN_PASSWORD = import.meta.env.VITE_ADMIN_PASSWORD || 'habit2025';
 
 export function EventProvider({ children }: { children: ReactNode }) {
-  const [events, setEvents] = useState<BarEvent[]>(() => {
-    const saved = localStorage.getItem('barhabit_events');
-    return saved ? JSON.parse(saved) : defaultEvents;
-  });
-
+  const [events, setEvents] = useState<BarEvent[]>([]);
+  const [loading, setLoading] = useState(true);
   const [isAuthenticated, setIsAuthenticated] = useState(() => {
     return sessionStorage.getItem('barhabit_auth') === 'true';
   });
 
+  // イベント取得
+  const fetchEvents = async () => {
+    setLoading(true);
+    
+    if (isSupabaseConfigured() && supabase) {
+      try {
+        const { data, error } = await supabase
+          .from('events')
+          .select('*')
+          .order('date', { ascending: false });
+        
+        if (error) throw error;
+        
+        // Supabaseのデータを変換
+        const formattedEvents: BarEvent[] = (data || []).map(event => ({
+          id: event.id,
+          title: event.title,
+          date: event.date,
+          day: event.day,
+          time: event.time,
+          genre: event.genre,
+          djs: event.djs || [],
+          entrance: event.entrance,
+          featured: event.featured || false,
+          imageUrl: event.image_url || '',
+        }));
+        
+        setEvents(formattedEvents);
+      } catch (error) {
+        console.error('イベント取得エラー:', error);
+        // エラー時はローカルストレージから取得
+        const saved = localStorage.getItem('barhabit_events');
+        setEvents(saved ? JSON.parse(saved) : defaultEvents);
+      }
+    } else {
+      // ローカルモード
+      const saved = localStorage.getItem('barhabit_events');
+      setEvents(saved ? JSON.parse(saved) : defaultEvents);
+    }
+    
+    setLoading(false);
+  };
+
   useEffect(() => {
-    localStorage.setItem('barhabit_events', JSON.stringify(events));
+    fetchEvents();
+  }, []);
+
+  // ローカルモード時のローカルストレージ保存
+  useEffect(() => {
+    if (!isSupabaseConfigured()) {
+      localStorage.setItem('barhabit_events', JSON.stringify(events));
+    }
   }, [events]);
 
-  const addEvent = (eventData: Omit<BarEvent, 'id'>) => {
-    const newId = Math.max(...events.map(e => e.id), 0) + 1;
-    setEvents([...events, { ...eventData, id: newId }]);
+  const addEvent = async (eventData: Omit<BarEvent, 'id'>) => {
+    if (isSupabaseConfigured() && supabase) {
+      try {
+        const { error } = await supabase
+          .from('events')
+          .insert([{
+            title: eventData.title,
+            date: eventData.date,
+            day: eventData.day,
+            time: eventData.time,
+            genre: eventData.genre,
+            djs: eventData.djs,
+            entrance: eventData.entrance,
+            featured: eventData.featured,
+            image_url: eventData.imageUrl,
+          }]);
+        
+        if (error) throw error;
+        await fetchEvents();
+      } catch (error) {
+        console.error('イベント追加エラー:', error);
+        throw error;
+      }
+    } else {
+      // ローカルモード
+      const newId = Math.max(...events.map(e => e.id), 0) + 1;
+      setEvents([...events, { ...eventData, id: newId }]);
+    }
   };
 
-  const updateEvent = (id: number, eventData: Omit<BarEvent, 'id'>) => {
-    setEvents(events.map(event => 
-      event.id === id ? { ...eventData, id } : event
-    ));
+  const updateEvent = async (id: number, eventData: Omit<BarEvent, 'id'>) => {
+    if (isSupabaseConfigured() && supabase) {
+      try {
+        const { error } = await supabase
+          .from('events')
+          .update({
+            title: eventData.title,
+            date: eventData.date,
+            day: eventData.day,
+            time: eventData.time,
+            genre: eventData.genre,
+            djs: eventData.djs,
+            entrance: eventData.entrance,
+            featured: eventData.featured,
+            image_url: eventData.imageUrl,
+          })
+          .eq('id', id);
+        
+        if (error) throw error;
+        await fetchEvents();
+      } catch (error) {
+        console.error('イベント更新エラー:', error);
+        throw error;
+      }
+    } else {
+      // ローカルモード
+      setEvents(events.map(event => 
+        event.id === id ? { ...eventData, id } : event
+      ));
+    }
   };
 
-  const deleteEvent = (id: number) => {
-    setEvents(events.filter(event => event.id !== id));
+  const deleteEvent = async (id: number) => {
+    if (isSupabaseConfigured() && supabase) {
+      try {
+        const { error } = await supabase
+          .from('events')
+          .delete()
+          .eq('id', id);
+        
+        if (error) throw error;
+        await fetchEvents();
+      } catch (error) {
+        console.error('イベント削除エラー:', error);
+        throw error;
+      }
+    } else {
+      // ローカルモード
+      setEvents(events.filter(event => event.id !== id));
+    }
+  };
+
+  const refreshEvents = async () => {
+    await fetchEvents();
   };
 
   const login = (password: string): boolean => {
@@ -114,9 +235,11 @@ export function EventProvider({ children }: { children: ReactNode }) {
   return (
     <EventContext.Provider value={{
       events,
+      loading,
       addEvent,
       updateEvent,
       deleteEvent,
+      refreshEvents,
       isAuthenticated,
       login,
       logout,
@@ -133,4 +256,3 @@ export function useEvents() {
   }
   return context;
 }
-
